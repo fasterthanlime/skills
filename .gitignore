@@ -1,0 +1,8 @@
+*
+!.gitignore
+!CLAUDE.md
+!README.md
+!skills/
+!skills/**
+!commands/
+!commands/**
