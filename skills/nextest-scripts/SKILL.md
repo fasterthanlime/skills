@@ -5,271 +5,370 @@ description: Configure cargo-nextest wrapper and setup scripts for test instrume
 
 # Nextest Wrapper & Setup Scripts
 
-Configure `cargo nextest` with wrapper scripts (valgrind, resource limits) and setup scripts (fixtures, services).
+Configure `cargo nextest` with wrapper scripts (valgrind, heaptrack, strace, perf) and setup scripts (build helpers, fixtures).
 
-## Configuration File
+## Enabling Experimental Features
 
-Create `.config/nextest.toml` in your project root.
+Wrapper and setup scripts require experimental flags in `.config/nextest.toml`:
+
+```toml
+# Enable both wrapper and setup scripts
+experimental = ["wrapper-scripts", "setup-scripts"]
+
+# Or just one:
+# experimental = ["wrapper-scripts"]
+# experimental = ["setup-scripts"]
+```
 
 ## Wrapper Scripts
 
-Wrapper scripts wrap test binary execution. Use for instrumentation, resource limits, or debugging.
+Wrapper scripts wrap test binary execution for instrumentation, debugging, or resource limits.
 
-### Basic Wrapper
-
-```toml
-# .config/nextest.toml
-
-[scripts.wrapper.my-wrapper]
-command = 'path/to/wrapper.sh'
-
-[profile.instrumented]
-run-wrapper = 'my-wrapper'
-```
-
-Usage:
-```bash
-cargo nextest run --profile instrumented
-```
-
-### Valgrind Integration
+### Defining Wrappers
 
 ```toml
 [scripts.wrapper.valgrind]
-command = 'valgrind --leak-check=full --show-leak-kinds=all --errors-for-leak-kinds=definite,indirect --error-exitcode=1'
+command = 'valgrind --leak-check=full --error-exitcode=1'
 
+[scripts.wrapper.heaptrack]
+command = 'heaptrack'
+
+[scripts.wrapper.strace]
+command = '/path/to/strace-wrapper.sh'
+
+# Use relative-to for project scripts
+[scripts.wrapper.custom]
+command = { command-line = "scripts/wrapper.sh", relative-to = "workspace-root" }
+```
+
+### Applying Wrappers via Rules
+
+Wrappers are applied using `[[profile.<name>.scripts]]` arrays:
+
+```toml
 [profile.valgrind]
+
+[[profile.valgrind.scripts]]
+filter = 'all()'
+run-wrapper = 'valgrind'
+
+# Platform-specific wrapper
+[[profile.valgrind.scripts]]
 platform = 'cfg(target_os = "linux")'
+filter = 'all()'
 run-wrapper = 'valgrind'
 ```
 
-Usage:
-```bash
-cargo nextest run --profile valgrind -p mypkg test_name
-```
+### list-wrapper vs run-wrapper
 
-### Memory Limits (systemd-run)
+- `run-wrapper` - Wraps test execution
+- `list-wrapper` - Wraps test listing (for cross-compilation/emulators like wine, qemu)
 
 ```toml
-[scripts.wrapper.limited]
-command = 'systemd-run --user --scope -p MemoryMax=512M -p MemorySwapMax=0'
+[[profile.windows-tests.scripts]]
+filter = 'binary(windows_compat_tests)'
+platform = { host = 'cfg(unix)', target = 'cfg(windows)' }
+list-wrapper = 'wine-script'
+run-wrapper = 'wine-script'
+```
 
-[profile.limited]
+**Note:** If `list-wrapper` is used, `filter` cannot contain `test()` or `default()` predicates.
+
+### Real-World Wrapper Examples
+
+#### Valgrind (Memory Debugging)
+
+```toml
+[scripts.wrapper.valgrind]
+# --leak-check=full: show details for each leak
+# --show-leak-kinds=all: show all leak types for diagnostics
+# --errors-for-leak-kinds=definite,indirect: only fail on real leaks
+# --error-exitcode=1: exit with 1 if errors found
+command = 'valgrind --leak-check=full --show-leak-kinds=all --errors-for-leak-kinds=definite,indirect --error-exitcode=1'
+
+[scripts.wrapper.valgrind-lean]
+# Faster than full leak detection, just catches runtime errors
+command = 'valgrind --error-exitcode=1 --track-origins=yes --read-var-info=yes --verbose'
+
+[profile.valgrind]
+[[profile.valgrind.scripts]]
+filter = 'all()'
+run-wrapper = 'valgrind'
+
+[profile.valgrind-lean]
+[[profile.valgrind-lean.scripts]]
+filter = 'all()'
+run-wrapper = 'valgrind-lean'
+```
+
+#### Heaptrack (Memory Profiling)
+
+```toml
+[scripts.wrapper.heaptrack]
+command = 'heaptrack'
+
+[profile.heaptrack]
+[[profile.heaptrack.scripts]]
 platform = 'cfg(target_os = "linux")'
-run-wrapper = 'limited'
+filter = 'all()'
+run-wrapper = 'heaptrack'
 ```
 
-### Custom Wrapper Script
-
-Create `scripts/test-wrapper.sh`:
-```bash
-#!/bin/bash
-set -e
-
-# Environment setup
-export MY_VAR=value
-
-# Optional: resource limits
-if [[ -n "$MEMORY_LIMIT" ]]; then
-    exec systemd-run --user --scope -p MemoryMax="$MEMORY_LIMIT" "$@"
-else
-    exec "$@"
-fi
-```
+#### Strace (Syscall Tracing)
 
 ```toml
-[scripts.wrapper.custom]
-command = 'scripts/test-wrapper.sh'
+[scripts.wrapper.strace]
+command = { command-line = ".config/strace-wrapper.sh", relative-to = "workspace-root" }
 
-[profile.custom]
-run-wrapper = 'custom'
-```
-
-### Callgrind Profiling
-
-```toml
-[scripts.wrapper.callgrind]
-command = 'valgrind --tool=callgrind --callgrind-out-file=callgrind.out'
-
-[profile.callgrind]
+[profile.strace]
+[[profile.strace.scripts]]
 platform = 'cfg(target_os = "linux")'
-run-wrapper = 'callgrind'
-test-threads = 1  # Single thread for clean profiling
+filter = 'all()'
+run-wrapper = 'strace'
 ```
+
+#### Perf (Performance Profiling)
+
+```toml
+[scripts.wrapper.perf]
+command = { command-line = ".config/perf-wrapper.sh", relative-to = "workspace-root" }
+
+[profile.perf]
+[[profile.perf.scripts]]
+platform = 'cfg(target_os = "linux")'
+filter = 'all()'
+run-wrapper = 'perf'
+```
+
+#### systemd-run (Memory Limits)
+
+```toml
+[scripts.wrapper.systemd-run]
+command = 'systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0'
+
+[profile.systemd-run]
+[[profile.systemd-run.scripts]]
+platform = 'cfg(target_os = "linux")'
+filter = 'all()'
+run-wrapper = 'systemd-run'
+```
+
+#### LLDB (Crash Debugging on macOS)
+
+```toml
+[scripts.wrapper.lldb]
+command = { command-line = "scripts/lldb-wrapper.sh", relative-to = "workspace-root" }
+
+[profile.lldb]
+[[profile.lldb.scripts]]
+platform = 'cfg(target_os = "macos")'
+filter = 'all()'
+run-wrapper = 'lldb'
+
+[profile.debug]
+# Allow 24 hours for manual debugging
+slow-timeout = { period = "86400s" }
+retries = 0
+```
+
+#### Sudo (Privileged Tests)
+
+```toml
+[scripts.wrapper.sudo-script]
+command = 'sudo'
+
+[[profile.ci.scripts]]
+# IMPORTANT: Scope privileged tests as tightly as possible
+filter = 'binary_id(package::binary) and test(=root_test)'
+platform = 'cfg(target_os = "linux")'
+run-wrapper = 'sudo-script'
+```
+
+**Warning:** Running tests as root can damage your system. Prefer running privileged tests in containers.
 
 ## Setup Scripts
 
-Setup scripts run **before** tests. Use for starting services, creating fixtures, or environment prep.
+Setup scripts run **before** tests for building helpers, starting services, or creating fixtures.
 
-### Basic Setup
+### Defining Setup Scripts
 
 ```toml
-[scripts.setup.start-db]
-command = 'scripts/start-test-db.sh'
+[scripts.setup.build-helpers]
+command = "cargo build --bins -p helper-crate"
+slow-timeout = { period = "60s" }
 
-[profile.integration]
-setup = ['start-db']
+[scripts.setup.start-db]
+command = { command-line = "scripts/start-test-db.sh", relative-to = "workspace-root" }
+slow-timeout = { period = "60s", terminate-after = 2 }
+leak-timeout = "1s"
+capture-stdout = true
+capture-stderr = false
 ```
 
-### Setup with Arguments
+### Applying Setup Scripts via Rules
 
 ```toml
-[scripts.setup.setup-env]
-command = 'scripts/setup.sh'
+# Run setup for all tests
+[[profile.default.scripts]]
+filter = 'all()'
+setup = 'build-helpers'
 
-[profile.dev]
-setup = ['setup-env']
-```
+# Platform-specific setup
+[[profile.default.scripts]]
+platform = { host = "cfg(unix)" }
+filter = 'all()'
+setup = 'set-env-unix'
 
-### Multiple Setup Scripts
+[[profile.default.scripts]]
+platform = { host = "cfg(windows)" }
+filter = 'all()'
+setup = 'set-env-windows'
 
-```toml
-[scripts.setup.start-db]
-command = 'docker compose up -d postgres'
-
-[scripts.setup.wait-db]
-command = 'scripts/wait-for-postgres.sh'
-
-[scripts.setup.seed-db]
-command = 'scripts/seed-test-data.sh'
-
-[profile.integration]
+# Multiple setup scripts
+[[profile.integration.scripts]]
+filter = 'rdeps(db-tests)'
 setup = ['start-db', 'wait-db', 'seed-db']
 ```
 
-## Profile Configuration
+### Environment Variables from Setup Scripts
 
-### Full Example
+Setup scripts can export environment variables to tests via `$NEXTEST_ENV`:
+
+```bash
+#!/usr/bin/env bash
+# scripts/setup-test-env.sh
+
+if [ -z "$NEXTEST_ENV" ]; then
+    exit 1
+fi
+
+echo "DATABASE_URL=postgres://localhost:5432/test" >> "$NEXTEST_ENV"
+echo "TEST_MODE=1" >> "$NEXTEST_ENV"
+```
+
+Tests matching the script's filter will see these environment variables.
+
+### Real-World Setup Examples
+
+#### Pre-Build Helper Binaries
 
 ```toml
-# .config/nextest.toml
+[scripts.setup.build-helpers]
+command = "cargo build --bins -p diagnostics -p http-handler -p template-engine"
+slow-timeout = { period = "60s" }
+
+[[profile.default.scripts]]
+filter = 'all()'
+setup = 'build-helpers'
+```
+
+#### Build Workspace Before Tests
+
+```toml
+[scripts.setup.build-cells]
+command = 'cargo build --workspace --exclude devtools'
+
+[[profile.default.scripts]]
+platform = 'cfg(target_os = "linux")'
+filter = 'not test(serve::)'
+setup = 'build-cells'
+```
+
+## Complete Configuration Examples
+
+### Minimal Setup-Only Config
+
+```toml
+experimental = ["setup-scripts"]
+
+[scripts.setup.build-helpers]
+command = "cargo build --bins -p helper-crate"
+slow-timeout = { period = "60s" }
+
+[profile.default]
+fail-fast = true
+slow-timeout = { period = "10s", terminate-after = 6 }
+```
+
+### Full Config with Wrappers and Setup
+
+```toml
+experimental = ["wrapper-scripts", "setup-scripts"]
+
+# Setup scripts
+[scripts.setup.set-env-unix]
+command = 'scripts/setup-test-env.sh'
+
+[scripts.setup.set-env-windows]
+command = 'scripts/setup-test-env.cmd'
 
 # Wrapper scripts
 [scripts.wrapper.valgrind]
 command = 'valgrind --leak-check=full --error-exitcode=1'
 
-[scripts.wrapper.limited]
-command = 'systemd-run --user --scope -p MemoryMax=1G'
+[scripts.wrapper.heaptrack]
+command = 'heaptrack'
 
-# Setup scripts
-[scripts.setup.prepare]
-command = 'scripts/prepare-tests.sh'
+[scripts.wrapper.lldb]
+command = { command-line = "scripts/lldb-wrapper.sh", relative-to = "workspace-root" }
 
-# Default profile (always applied)
+# Default profile with platform-specific setup
 [profile.default]
-retries = 0
 fail-fast = true
 
-# CI profile
-[profile.ci]
-retries = 2
-fail-fast = false
-test-threads = 4
+[[profile.default.scripts]]
+filter = 'all()'
+platform = { host = "cfg(unix)" }
+setup = 'set-env-unix'
 
-# Debug profile with valgrind
+[[profile.default.scripts]]
+filter = 'all()'
+platform = { host = "cfg(windows)" }
+setup = 'set-env-windows'
+
+# Valgrind profile
 [profile.valgrind]
-platform = 'cfg(target_os = "linux")'
+[[profile.valgrind.scripts]]
+filter = 'all()'
 run-wrapper = 'valgrind'
-test-threads = 1
-slow-timeout = { period = "60s" }
 
-# Integration tests with setup
-[profile.integration]
-setup = ['prepare']
-test-threads = 1
-
-# Memory-limited tests
-[profile.limited]
+# Heaptrack profile (Linux only)
+[profile.heaptrack]
+[[profile.heaptrack.scripts]]
 platform = 'cfg(target_os = "linux")'
-run-wrapper = 'limited'
-```
+filter = 'all()'
+run-wrapper = 'heaptrack'
 
-## Platform-Specific Configuration
-
-### Linux Only
-
-```toml
-[profile.valgrind]
-platform = 'cfg(target_os = "linux")'
-run-wrapper = 'valgrind'
-```
-
-### macOS Only
-
-```toml
-[profile.macos-debug]
+# LLDB profile (macOS only)
+[profile.lldb]
+[[profile.lldb.scripts]]
 platform = 'cfg(target_os = "macos")'
-# macOS-specific settings
+filter = 'all()'
+run-wrapper = 'lldb'
+
+# Debug profile for manual debugging
+[profile.debug]
+slow-timeout = { period = "86400s" }
+retries = 0
 ```
 
-### Combine Conditions
+### Config with Default Filter
 
 ```toml
-[profile.linux-x86]
-platform = 'cfg(all(target_os = "linux", target_arch = "x86_64"))'
-```
+experimental = ["wrapper-scripts", "setup-scripts"]
 
-## Environment Variables
+[profile.default]
+test-threads = 4
+# Exclude integration tests from default runs
+default-filter = 'not test(serve::)'
 
-### In Wrapper Scripts
-
-Wrappers receive the test command as arguments. Use `"$@"` to pass through:
-
-```bash
-#!/bin/bash
-export MY_VAR=value
-exec "$@"
-```
-
-### In nextest.toml
-
-```toml
-[profile.default.env]
-MY_VAR = "value"
-RUST_BACKTRACE = "1"
-```
-
-## Useful Patterns
-
-### Conditional Wrapper via Environment
-
-```bash
-#!/bin/bash
-# scripts/maybe-valgrind.sh
-if [[ "$USE_VALGRIND" == "1" ]]; then
-    exec valgrind --leak-check=full "$@"
-else
-    exec "$@"
-fi
-```
-
-```bash
-USE_VALGRIND=1 cargo nextest run --profile custom
-```
-
-### Timeout Wrapper
-
-```bash
-#!/bin/bash
-# scripts/with-timeout.sh
-exec timeout ${TEST_TIMEOUT:-60} "$@"
-```
-
-### Retry on Flaky Tests
-
-```toml
-[profile.flaky]
-retries = 3
-retry-delay = { delay = "1s", backoff = "exponential" }
+[[profile.default.scripts]]
+platform = 'cfg(target_os = "linux")'
+filter = 'not test(serve::)'
+setup = 'build-deps'
 ```
 
 ## Debugging
-
-### List Available Profiles
-
-```bash
-cargo nextest list --profile valgrind
-```
 
 ### Show Effective Configuration
 
@@ -278,23 +377,27 @@ cargo nextest show-config test
 cargo nextest show-config test --profile valgrind
 ```
 
-### Verbose Wrapper Execution
-
-Add `-v` to see what's being executed:
+### Verbose Execution
 
 ```bash
 cargo nextest run -v --profile valgrind test_name
+```
+
+### Test Wrapper Manually
+
+```bash
+valgrind ./target/debug/deps/mytest-abc123 test_name --nocapture
 ```
 
 ## Common Issues
 
 ### Wrapper Not Found
 
-Ensure script is executable and in PATH or use absolute/relative path:
+Ensure script is executable and use `relative-to`:
 
 ```toml
 [scripts.wrapper.my-wrapper]
-command = './scripts/wrapper.sh'  # Relative to project root
+command = { command-line = "scripts/wrapper.sh", relative-to = "workspace-root" }
 ```
 
 ### Slow Tests Timeout
@@ -306,12 +409,14 @@ Increase timeout for instrumented tests:
 slow-timeout = { period = "120s", terminate-after = 2 }
 ```
 
-### Tests Fail Under Wrapper
+### Setup Script Timeout
 
-Test with wrapper manually first:
+Add `slow-timeout` to setup script definition:
 
-```bash
-valgrind ./target/debug/deps/mytest-abc123 test_name --nocapture
+```toml
+[scripts.setup.build-helpers]
+command = "cargo build --bins"
+slow-timeout = { period = "120s" }
 ```
 
 ## See Also

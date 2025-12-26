@@ -191,35 +191,66 @@ Common profile settings:
 
 Wrapper scripts execute around test binaries for instrumentation, resource limits, or debugging.
 
-### Configuring Wrappers
+**Note:** Wrapper scripts are experimental. Enable with:
+```toml
+experimental = ["wrapper-scripts"]
+```
+
+### Defining Wrapper Scripts
 
 In `.config/nextest.toml`:
 
 ```toml
+experimental = ["wrapper-scripts"]
+
 [scripts.wrapper.valgrind]
 command = 'valgrind --leak-check=full --error-exitcode=1'
 
-[scripts.wrapper.timeout]
-command = 'timeout ${TIMEOUT:-60}'
+[scripts.wrapper.sudo-script]
+command = 'sudo'
 
-[scripts.wrapper.limited]
-command = 'systemd-run --user --scope -p MemoryMax=${MEMORY_LIMIT:-2G} -p MemorySwapMax=0'
-platform = 'cfg(target_os = "linux")'
+[scripts.wrapper.wine-script]
+command = 'wine'
 
-[profile.valgrind]
-run-wrapper = 'valgrind'
-test-threads = 1
-platform = 'cfg(target_os = "linux")'
+# Use relative-to for scripts in your project
+[scripts.wrapper.project-wrapper]
+command = { command-line = "scripts/wrapper.sh", relative-to = "workspace-root" }
 ```
+
+### Configuring Wrapper Rules
+
+Wrappers are applied via `[[profile.<name>.scripts]]` rules with filtersets:
+
+```toml
+# Run specific tests with sudo (Linux only)
+[[profile.ci.scripts]]
+filter = 'binary_id(package::binary) and test(=root_test)'
+platform = 'cfg(target_os = "linux")'
+run-wrapper = 'sudo-script'
+
+# Use wine for Windows tests on Unix hosts
+[[profile.windows-tests.scripts]]
+filter = 'binary(windows_compat_tests)'
+platform = { host = 'cfg(unix)', target = 'cfg(windows)' }
+list-wrapper = 'wine-script'
+run-wrapper = 'wine-script'
+```
+
+### list-wrapper vs run-wrapper
+
+- `run-wrapper` - Used when executing tests
+- `list-wrapper` - Used when listing tests (for cross-compilation/emulators)
+
+**Note:** If `list-wrapper` is specified, `filter` cannot contain `test()` or `default()` predicates.
 
 ### Running with Wrappers
 
 ```bash
-# Run tests with valgrind wrapper
-cargo nextest run --profile valgrind
+# Run tests with ci profile (applies wrapper rules)
+cargo nextest run --profile ci
 
-# Run tests with memory limits (Linux only)
-cargo nextest run --profile limited
+# Run tests for Windows on Unix host
+cargo nextest run --profile windows-tests
 ```
 
 ### Common Wrapper Use Cases
@@ -227,7 +258,8 @@ cargo nextest run --profile limited
 1. **Memory debugging** - valgrind, sanitizers
 2. **Performance profiling** - callgrind, perf
 3. **Resource limits** - systemd-run, timeout
-4. **Custom instrumentation** - coverage tools, tracers
+4. **Privilege escalation** - sudo (for tests requiring root)
+5. **Cross-compilation** - wine, qemu
 
 ## Setup Scripts
 
@@ -237,18 +269,64 @@ Setup scripts run **before** tests start, useful for:
 - Creating test fixtures
 - Preparing the environment
 
-### Configuring Setup Scripts
-
+**Note:** Setup scripts are experimental. Enable with:
 ```toml
-[scripts.setup.start-db]
-command = 'scripts/start-test-db.sh'
-
-[profile.integration]
-setup = ['start-db']
-test-threads = 1
+experimental = ["setup-scripts"]
 ```
 
-Run with setup:
+### Defining Setup Scripts
+
+```toml
+experimental = ["setup-scripts"]
+
+[scripts.setup.db-generate]
+command = 'cargo run -p db-generate'
+slow-timeout = { period = "60s", terminate-after = 2 }
+leak-timeout = "1s"
+capture-stdout = true
+capture-stderr = false
+
+[scripts.setup.start-db]
+command = { command-line = "scripts/start-test-db.sh", relative-to = "workspace-root" }
+```
+
+### Configuring Setup Script Rules
+
+Setup scripts are applied via `[[profile.<name>.scripts]]` rules:
+
+```toml
+# Run db-generate for tests that depend on db-tests package
+[[profile.default.scripts]]
+filter = 'rdeps(db-tests)'
+setup = 'db-generate'
+
+# Platform-specific setup
+[[profile.default.scripts]]
+platform = { host = "cfg(unix)" }
+setup = 'unix-setup'
+
+# Multiple setup scripts for integration tests
+[[profile.integration.scripts]]
+filter = 'test(/^script_tests::/)'
+setup = ['start-db', 'seed-db']
+```
+
+### Environment Variables from Setup Scripts
+
+Setup scripts can export environment variables to tests via `$NEXTEST_ENV`:
+
+```bash
+#!/usr/bin/env bash
+# my-env-script.sh
+if [ -z "$NEXTEST_ENV" ]; then
+    exit 1
+fi
+echo "MY_ENV_VAR=Hello, world!" >> "$NEXTEST_ENV"
+```
+
+Tests matching the script's filter will see `MY_ENV_VAR`.
+
+### Running with Setup
 
 ```bash
 cargo nextest run --profile integration
@@ -360,19 +438,27 @@ cargo nextest run --profile callgrind -p mypkg test_name
 
 ## Platform-Specific Features
 
-Some features are platform-specific and should use the `platform` key:
+Platform filtering works both at the profile level and in script rules:
 
 ```toml
+# Profile-level platform restriction
 [profile.valgrind]
 platform = 'cfg(target_os = "linux")'
-run-wrapper = 'valgrind'
 
-[profile.systemd-limits]
+# Script rule with platform filter
+[[profile.ci.scripts]]
+filter = 'binary_id(pkg::bin) and test(=root_test)'
 platform = 'cfg(target_os = "linux")'
-run-wrapper = 'limited'
+run-wrapper = 'sudo-script'
+
+# Cross-compilation: host vs target platform
+[[profile.cross.scripts]]
+platform = { host = 'cfg(unix)', target = 'cfg(windows)' }
+list-wrapper = 'wine-script'
+run-wrapper = 'wine-script'
 ```
 
-On unsupported platforms, nextest will skip the profile or show an error.
+On unsupported platforms, nextest will skip the profile or rule.
 
 ## Summary
 
